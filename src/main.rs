@@ -156,4 +156,3 @@ impl Widget for &App {
         );
     }
 }
-
