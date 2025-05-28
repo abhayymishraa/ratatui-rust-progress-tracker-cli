@@ -1,45 +1,37 @@
-use std::{
-    io::{self},
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{io, sync::mpsc, thread, time::Duration};
 
 use crossterm::{
     event::{KeyCode, KeyEventKind},
     style::Stylize,
 };
+
 use ratatui::{
-    DefaultTerminal, Frame,
+    DefaultTerminal,
     layout::{Constraint, Layout, Rect},
+    prelude::*,
     style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Widget},
+    widgets::{Block, Gauge, Widget},
 };
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
-    let mut app = App {
-        exit: false,
-        progress_bar_color: Color::Green,
-        background_progress: 0.0,
-    };
+    let mut app = App::default();
 
     let (tx, rx) = mpsc::channel::<Event>();
 
-    let tx_clone = tx.clone();
-    thread::spawn(move || {
-        handle_input_event(tx_clone);
-    });
-    thread::spawn(move || {
-        run_background_thread(tx);
-    });
-    let app_result = app.run(&mut terminal, rx);
+    let tx_input = tx.clone();
+    thread::spawn(move || handle_input_event(tx_input));
+
+    thread::spawn(move || run_background_thread(tx));
+
+    let result = app.run(&mut terminal, rx);
     ratatui::restore();
-    app_result
+    result
 }
 
+#[derive(Default)]
 pub struct App {
     exit: bool,
     progress_bar_color: Color,
@@ -52,32 +44,48 @@ enum Event {
 }
 
 fn handle_input_event(tx: mpsc::Sender<Event>) {
-    loop {
-        match crossterm::event::read().unwrap() {
-            crossterm::event::Event::Key(key_event) => tx.send(Event::Input(key_event)).unwrap(),
-            _ => {}
+    while let Ok(event) = crossterm::event::read() {
+        if let crossterm::event::Event::Key(key_event) = event {
+            let _ = tx.send(Event::Input(key_event));
         }
     }
 }
 
 fn run_background_thread(tx: mpsc::Sender<Event>) {
-    let mut progress = 0_f64;
-    let increment = 0.01;
+    let mut progress: f64 = 0.0;
     loop {
         thread::sleep(Duration::from_millis(100));
-        progress += increment;
-        progress = progress.min(1_f64);
-        tx.send(Event::Progress(progress)).unwrap();
+        progress = (progress + 0.01).min(1.0);
+        let _ = tx.send(Event::Progress(progress));
     }
 }
 
 impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal, rx: mpsc::Receiver<Event>) -> io::Result<()> {
         while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
+            terminal.draw(|f| self.draw(f))?;
             match rx.recv().unwrap() {
-                Event::Input(key_event) => self.on_key_event(key_event)?,
-                Event::Progress(progress) => self.background_progress = progress,
+                Event::Input(key_event) => self.handle_key(key_event)?,
+                Event::Progress(p) => self.background_progress = p,
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> io::Result<()> {
+        if key.kind == KeyEventKind::Press {
+            match key.code {
+                KeyCode::Char('q') => {
+                    self.exit = true;
+                    println!("{}", "Exiting application...".red());
+                }
+                KeyCode::Char('c') => {
+                    self.progress_bar_color = match self.progress_bar_color {
+                        Color::Green => Color::Yellow,
+                        _ => Color::Green,
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -86,70 +94,68 @@ impl App {
     fn draw(&self, frame: &mut Frame) {
         frame.render_widget(self, frame.area());
     }
-
-    fn on_key_event(&mut self, key_event: crossterm::event::KeyEvent) -> io::Result<()> {
-        if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('q') {
-            self.exit = true;
-            println!("{}", "Exiting application...".red());
-        } else if key_event.kind == KeyEventKind::Press && key_event.code == KeyCode::Char('c') {
-            if self.progress_bar_color == Color::Green {
-                self.progress_bar_color = Color::Yellow;
-            } else {
-                self.progress_bar_color = Color::Green;
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Widget for &App {
-    fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer)
-    where
-        Self: Sized,
-    {
-        let vertical_layout =
-            Layout::vertical([Constraint::Percentage(20), Constraint::Percentage(80)]);
-        let [title_area, guage_area] = vertical_layout.areas(area);
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let layout = Layout::vertical([Constraint::Length(3), Constraint::Min(5)]);
+        let [title_area, gauge_area] = layout.areas(area);
 
-        Line::raw("Process Overview").render(title_area, buf);
+        self.draw_title(title_area, buf);
+        self.draw_progress_bar(gauge_area, buf);
+    }
+}
 
+impl App {
+    fn draw_title(&self, area: Rect, buf: &mut Buffer) {
+        Line::from(vec![Span::styled(
+            "🛠️  Process Overview",
+            Style::default().add_modifier(Modifier::BOLD),
+        )])
+        .centered()
+        .render(area, buf);
+    }
+
+    fn draw_progress_bar(&self, area: Rect, buf: &mut Buffer) {
         let instructions = Line::from(vec![
-            Span::styled("Change color", Style::default()),
+            Span::styled("Press ", Style::default()),
             Span::styled(
-                "<C>",
+                "C",
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" Quit ", Style::default()),
+            Span::styled(" to toggle color | ", Style::default()),
             Span::styled(
-                "<q>",
+                "Q",
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(" to quit", Style::default()),
         ])
         .centered();
 
         let block = Block::bordered()
-            .title(Line::from("Background Processes"))
+            .title("Background Processes")
             .title_bottom(instructions)
-            .border_set(border::THICK);
+            .border_set(border::THICK)
+            .style(Style::default());
 
-        let progress_bar = ratatui::widgets::Gauge::default()
-            .gauge_style(Style::default().fg(self.progress_bar_color))
+        let gauge = Gauge::default()
             .block(block)
-            .label(format!(
-                "Process 1: {:.0}%",
-                self.background_progress * 100.0
+            .gauge_style(Style::default().fg(self.progress_bar_color))
+            .label(Span::styled(
+                format!("{:.0}%", self.background_progress * 100.0),
+                Style::default().add_modifier(Modifier::BOLD),
             ))
             .ratio(self.background_progress);
 
-        progress_bar.render(
+        gauge.render(
             Rect {
-                x: guage_area.left(),
-                y: guage_area.top(),
-                width: guage_area.width,
+                x: area.left(),
+                y: area.top(),
+                width: area.width,
                 height: 3,
             },
             buf,
